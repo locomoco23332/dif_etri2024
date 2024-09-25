@@ -1,0 +1,256 @@
+import copy
+from json import load
+import time
+from multiprocessing import Condition
+import os
+from random import randint, random
+import sys
+import platform
+import pdb
+from unittest import loader
+from xml.dom import minicompat  # use pdb.set_trace() for debugging
+
+sys.path.append(os.getcwd())
+import libmainlib as m
+import luamodule as lua  # see luamodule.py
+import numpy as np
+import torch
+from gym_mp.models import Encoder, Decoder, VAE,DenoiseDiffusion2,DenoiseDiffusion,DenoiseDiffusion4,DenoiseDiffusion5,DenoiseDiffusion7
+import torch.optim as optim
+from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler, RandomSampler
+from tensorboardX import SummaryWriter
+import torch.nn.functional as F
+
+
+# simply forward UI events to lua
+def onCallback(mid, userdata):
+    lua.onCallback(mid, userdata)
+
+
+def onFrameChanged(currFrame):
+    lua.onFrameChanged(currFrame)
+
+
+def frameMove(fElapsedTime):
+    lua.frameMove(fElapsedTime)
+
+
+def handleRendererEvent(ev, button, x, y):
+    return lua.handleRendererEvent(ev, button, x, y)
+
+
+def lua_getdim():
+    l = m.getPythonWin()
+    l.getglobal("get_dim")
+    l.call(0, 1)
+    info = l.popvectorn()
+    state_dim = int(info.get(0))
+    action_dim = int(info.get(1))
+    # print(state_dim)
+    # print(action_dim)
+    return state_dim, action_dim
+
+
+def lua_getIframe(iframe):
+    l = m.getPythonWin()
+    l.getglobal("seok_getIframeDOF")
+    input = m.vectorn()
+    input.setSize(0)
+    input = iframe
+    # print(input)
+    l.push(input)
+    l.call(1, 1)
+    return l.popvectorn()
+
+
+def lua_getFrame():
+    l = m.getPythonWin()
+    l.getglobal("get_frame")
+    l.call(0, 1)
+    return l.popnumber()
+
+
+def Tonumpy(data):
+    return np.array(data.ref())
+
+
+def Discontinuity():
+    l = m.getPythonWin()
+    l.getglobal("getDiscontinuity")
+    l.call(0, 1)
+    return l.popvectorn()
+
+
+def Alldata_load():
+    l = m.getPythonWin()
+    l.getglobal("All_data_frames")
+    l.call(0, 1)
+    return l.popmatrixn()
+
+
+def main():
+    train = True
+    device="cpu"
+    #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    load_save_model = False
+    latent_size = 10
+    # walk : 64~128 stitch:512~1024
+    mini_batch = 2048
+    teacher_epochs = 20
+    ramping_epochs = 20
+    student_epochs = 120
+    num_epochs = teacher_epochs + ramping_epochs + student_epochs
+    num_experts = 6
+    initial_lr = 1e-4
+    # final_lr = 1e-7
+    prediction_frames = 8
+    condition_frame = 1
+    option = ''
+    if len(sys.argv) == 2:
+        scriptFile = sys.argv[1]
+    elif len(sys.argv) == 3:
+        option = sys.argv[1]
+        scriptFile = sys.argv[2]
+    uiscale = 1.5
+    if platform.system() == 'Darwin':
+        m.createMainWin(int((10 + 220) * uiscale), int((400 + 100) * uiscale), int(10 * uiscale), int(400 * uiscale),
+                        uiscale, "../Resource/ogreconfig_mac.txt", "plugins_mac.cfg", "ogre_mac.cfg")
+    else:
+        if option == '--sep':
+            m.createMainWin(int((10 + 220) * uiscale), int((400 + 100) * uiscale), int(10 * uiscale),
+                            int(400 * uiscale), uiscale, "../Resource/ogreconfig_linux_sepwin.txt", "plugins_linux.cfg",
+                            "ogre_linux.cfg")
+        else:
+            m.createMainWin(int((1024 + 180) * uiscale), int((600 + 100) * uiscale), int(1024 * uiscale),
+                            int(600 * uiscale), uiscale)
+    m.showMainWin()
+    if scriptFile[0:1] != '.':
+        scriptFile = os.path.relpath(scriptFile, os.getcwd())
+    if scriptFile[-3:] != 'lua':
+        scriptFile = scriptFile + '.lua'
+    print('loading', scriptFile)
+    m.getPythonWin().loadScript(scriptFile)
+
+    mocap_data = torch.from_numpy(Tonumpy(Alldata_load())).float().to(device)
+    if torch.isnan(mocap_data).any():
+        print("mocap data has nan value")
+
+    discont = Tonumpy(Discontinuity())
+    discont = list(map(int, discont))
+    mocap_size = mocap_data.shape[0]  # numframes = 26909
+    frame_size = mocap_data.shape[1]  # frame_size = 29
+    input_size = frame_size
+    output_size = frame_size
+
+    ######data normalize##########
+    avg = mocap_data.mean(dim=0)
+    std = mocap_data.std(dim=0)
+    for i in range(len(std)):
+        if std[i] == 0:
+            std[i] = 1
+    mocap_data = (mocap_data - avg) / std
+    ##############################
+    #vae = VAE(input_size, latent_size, num_experts, output_size).to(device)
+    #vae=DenoiseDiffusion2(input_size,10000,output_size).to(device)
+    vae=DenoiseDiffusion7(input_size,10000,output_size).to(device)
+    #vae.set_normalization(std.to(device="cpu"), avg.to(device="cpu"))
+
+    if load_save_model:
+        print("loading model")
+        vae = torch.load("vae_model_10.pt", map_location=device)
+
+    vae.train()
+    vae_optimizer = optim.Adam(vae.parameters(), lr=initial_lr)
+    scheduler_lr = optim.lr_scheduler.StepLR(vae_optimizer, step_size=10, gamma=0.9)
+    writer = SummaryWriter(
+        comment="MVAE" + "\nenv_name" + scriptFile + "\nbatch size" + str(num_epochs) + "\nmini batch size" + str(
+            mini_batch) + "\nlearning rate" + str(vae_optimizer.param_groups[0]['lr']))
+    all_indices = np.linspace(0, mocap_size - 1, mocap_size)
+    bad_indices = []
+    for i in range(len(discont) - 1):
+        for j in range(12):
+            bad_indices.append(discont[i + 1] - j)
+    bad_indices.sort()
+    good_mask = np.isin(all_indices, bad_indices, assume_unique=True, invert=True)
+    selectable_indices = all_indices[good_mask]
+    sample_schedule = torch.cat(
+        (
+            # First part is pure teacher forcing
+            torch.zeros(teacher_epochs),
+            # Second part with schedule sampling
+            torch.linspace(0.0, 1.0, ramping_epochs),
+            # last part is pure student
+            torch.ones(student_epochs),
+        ))
+    print(selectable_indices)
+    if train:
+        shape = (mini_batch, condition_frame, output_size)
+        history = torch.empty(shape).to(device)
+        start = time.time()
+        for ep in range(1, num_epochs + 1):
+            sampler = BatchSampler(SubsetRandomSampler(selectable_indices), mini_batch, drop_last=True)
+            ep_recon_loss = 0
+            ep_kl_loss = 0
+
+            num_of_minibatch = 1
+            for num_of_minibatch, indices in enumerate(sampler):
+                t_indices = torch.LongTensor(indices)
+                condition_range = (
+                        t_indices.repeat((1, 1)).t()
+                        + torch.arange(0, -1, -1).long()
+                )
+                t_indices += 1
+                history[:, :1].copy_(mocap_data[condition_range])
+
+                for offset in range(1, prediction_frames):
+                    use_student = torch.rand(1) < sample_schedule[ep - 1]
+                    prediction_range = (
+                            t_indices.repeat((1, 1)).t()
+                            + torch.arange(offset, offset + 1).long()
+                    )
+                    # print("t_indices",t_indices)
+                    # print("prediction_range",prediction_range)
+                    ground_truth = mocap_data[prediction_range]
+                    condition = history[:, :1]
+                    condition = condition.flatten(start_dim=1, end_dim=2)
+                    ground_truth = ground_truth.flatten(start_dim=1, end_dim=2)
+                    curr_pose = mocap_data[t_indices]
+                    t = torch.tensor(condition).long().to(device="cpu")
+                    curr_pose_noise = vae.q_sample(curr_pose,t)
+                    condition_noise=vae.q_sample(condition,t)
+                    output,mu,logvar= vae(curr_pose,condition_noise)
+                    #output, mu, logvar = vae(curr_pose, condition)
+                    history = history.roll(1, dims=1)
+                    next_frame = output if use_student else ground_truth
+                    history[:, 0].copy_(next_frame.detach())
+                    recon_loss = (output - ground_truth).pow(2).mean(dim=(0, -1))
+                    recon_loss = recon_loss.sum()
+                    #kl_loss = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).sum().clamp(max=0)
+                    #kl_loss /= logvar.numel()
+
+                    vae_optimizer.zero_grad()
+                    #(recon_loss + kl_loss).backward()
+                    (recon_loss).backward()
+                    vae_optimizer.step()
+
+                    ep_recon_loss += float(recon_loss) / prediction_frames
+                    ep_kl_loss += float(recon_loss) / prediction_frames
+
+            avg_recon_loss = ep_recon_loss / mini_batch
+            avg_kl_loss = ep_kl_loss / mini_batch
+            scheduler_lr.step()
+            end = time.time()
+
+            print(
+                "epoch : {ep}, ep_recon_loss : {ep_recon_loss:0.08f}, ep_kl_loss : {ep_kl_loss:0.08f}, learning_rate : {lr:0.07f} , FPS : {FPS}".format(
+                    ep=ep, ep_recon_loss=avg_recon_loss, ep_kl_loss=avg_kl_loss, lr=vae_optimizer.param_groups[0]['lr'],
+                    FPS=int((ep / (end - start)) * 100)))
+            writer.add_scalar('ep_recon_loss', avg_recon_loss, ep)
+            writer.add_scalar('ep_kl_loss', avg_kl_loss, ep)
+            writer.add_scalar('learning_rate', vae_optimizer.param_groups[0]['lr'], ep)
+            torch.save(copy.deepcopy(vae).cpu(), "trained_models/dif10_condition_10.pt")
+
+
+
+if __name__ == "__main__":
+    main()
