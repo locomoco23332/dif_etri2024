@@ -3294,6 +3294,8 @@ class Glow(nn.Module):
                 for step in steps:
                     x = step(x)
         return x
+# Define the ODE Function
+
 class DenoiseDiffusion14_mul(nn.Module):
     def __init__(self, input_size, noise_steps,latent_size ,output_size):
         super().__init__()
@@ -3360,6 +3362,119 @@ class DenoiseDiffusion14_mul(nn.Module):
         flow_op=torch.cat((flow_box,plane),dim=-1)
 
         z,mu,logvar=self.encoder(flow_op,c)
+        #z2=self.trans(x,c)
+        t_emb = self.time_embed(t)
+        x = self.unet(z,t_emb).to(device="cpu")
+        tt = torch.tensor(t_emb).long().to(device="cpu")
+        #x2 = self.unet(z2,t_emb).to(device="cpu") 
+        #tt = torch.tensor(t_emb).long().to(device="cuda")
+        mean,var=self.q_xt_x0(x,tt)
+        zc=torch.cat((x,z),dim=-1)
+        #zc2=torch.cat((x2,z),dim=-1)
+        return self.decoder(zc,c),mean,var
+
+import torch
+import torch.nn as nn
+import torchdiffeq  # Library for ODE solvers
+
+# Define ODE function
+class ODEfunc(nn.Module):
+    def __init__(self, dim):
+        super(ODEfunc, self).__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.ReLU(),
+            nn.Linear(dim, dim)
+        )
+
+    def forward(self, t,h):
+        return self.fc(h)
+
+# Neural ODE model
+class NeuralODE(nn.Module):
+    def __init__(self, dim):
+        super(NeuralODE, self).__init__()
+        self.ode_func = ODEfunc(dim)
+    
+    def forward(self, h0, t):
+        # Solve ODE using odeint
+        h = torchdiffeq.odeint(self.ode_func, h0, t)
+        return h
+
+class DenoiseDiffusion14_mul_vec(nn.Module):
+    def __init__(self, input_size, noise_steps,latent_size ,output_size):
+        super().__init__()
+        self.timesteps=noise_steps
+        self.gaussiandiffusion = GaussianDiffusion(input_size, noise_steps, output_size)
+        self.unet = UNet(35, 35)  # Assuming 3 input and 3 output channels for RGB can changin u-net
+        self.encoder=Encoder(input_size*3,35)
+        self.encoder2 =Encoder(input_size,35)
+        self.decoder=Decoder(35,70,5,output_size)
+        self.decoder2=Decoder(35,70,5,output_size)
+        self.flow = nn.Linear(70,64)
+        self.flow2 =nn.Linear(64,35)
+        self.plane1=nn.Linear(105,100)
+        self.plane2=nn.Linear(100,70)
+        self.plane3=nn.Linear(70,35)
+        self.h0 = torch.ones(2,2048, 35)
+        self.func=ODEfunc(dim=35)
+        self.ode = NeuralODE(dim=35)
+        #self.decoder2 = Decoder(35,70,5,output_size)
+        self.trans =TransformerModel(in_channels=35)
+        self.time_embed = TimeEmbedding(70)
+        self.beta =self.gaussiandiffusion.beta
+        self.mean=0
+        self.logvar=0
+    def generate(self,z,c):
+        z=torch.cat((z,c),dim=-1)
+        return self.decoder(z,c)
+    def q_xt_x0(self, x0, t):
+        mean = self.gaussiandiffusion.alpha_hat[t] ** 0.5 * x0
+        var = 1 - self.gaussiandiffusion.alpha_hat[t]
+        return mean, var
+
+    def q_sample(self, x0, t, eps=None):
+        if eps is None:
+            eps = torch.randn_like(x0)
+        mean, var = self.q_xt_x0(x0, t)
+        return mean + (var ** 0.5) * eps
+
+    def p_sample(self, xt,v,x0,x1,x2,t,c):
+        eps_theta,_,_ = self.forward(xt,v,x0,x1,x2,t,c)
+        tt=torch.tensor(0).long()
+        #eps_theta2 = eps_theta.repeat(1,5)
+        alpha_hat = self.gaussiandiffusion.alpha_hat[tt]
+        alpha = self.gaussiandiffusion.alpha[tt]
+        eps_coef = (1 - alpha) / (1 - alpha_hat) ** 0.5
+        #eps_coef2 = eps_coef.repeat(1,5)
+        mean = 1 / (alpha ** 0.5) * (xt - eps_coef * eps_theta)
+        var = self.gaussiandiffusion.beta[tt]
+        eps = torch.randn_like(xt)
+        #return mean+(var**0.5)
+        #return self.decoder(val,c)
+        #return mean + (var ** 0.5) * eps
+        #return val*mean+(var**0.5)
+        #return eps_theta
+        return mean
+    def forward(self, x,v,x0,x1,x2,t,c):
+        time_grid = torch.linspace(0, 1, steps=10)
+        y0 = v # Extend v to shape [2048, 35]
+        vt=self.ode(y0,time_grid)
+        vtx=vt[1,::]-vt[0,::]
+                 # Time grid
+        flow=torch.cat((x,v),dim=-1)
+        flow_box=self.flow(flow)
+        flow_box=self.flow2(flow_box)
+        plane=torch.cat((x0,x1),dim=-1)
+        plane=torch.cat((plane,x2),dim=-1)
+        plane=self.plane1(plane)
+        plane=self.plane2(plane)
+        plane=self.plane3(plane)
+        flow_op=torch.cat((flow_box,plane),dim=-1)
+        flow_box_t=torch.cat((flow_op,vtx),dim=-1)
+
+
+        z,mu,logvar=self.encoder(flow_box_t,c)
         #z2=self.trans(x,c)
         t_emb = self.time_embed(t)
         x = self.unet(z,t_emb).to(device="cpu")
