@@ -774,10 +774,10 @@ class UNetTransformer(nn.Module):
         self.res1 = ResNetBlock(99,99)
         self.attn1 = Attention(dim=99)
         self.nn2=nn.Linear(99,128)
-        self.down2 = DownsamplingBlock(128, 128)
-        self.res2 = ResNetBlock(128,128)
-        self.attn2 =Attention(dim=128)
-        self.nn3= nn.Linear(128,64)
+        self.down2 = DownsamplingBlock(163, 163)
+        self.res2 = ResNetBlock(163,163)
+        self.attn2 =Attention(dim=163)
+        self.nn3= nn.Linear(163,64)
         self.down3 =DownsamplingBlock(64,64)
         self.res3 = ResNetBlock(64,64)
         self.attn0=Attention(64)
@@ -788,40 +788,42 @@ class UNetTransformer(nn.Module):
         self.up0 = UpsamplingBlock(70,70)
         self.res0 = ResNetBlock(70,70)
         self.nn4 = nn.Linear(70,128)
-        self.mid1 =nn.Linear(256,128)
+        self.mid1 =nn.Linear(291,128)
         #self.mid2 =nn.Linear(128,64)
         self.up1 = UpsamplingBlock(128,128)
         self.res5 = ResNetBlock(128,128)
         self.attn3 = Attention(dim=128)
         self.nn5 = nn.Linear(128,64)
-        self.up2 = UpsamplingBlock(64, 64)
-        self.res6 = ResNetBlock(64,64)
-        self.attn4 =Attention(dim=64)
+        self.up2 = UpsamplingBlock(99, 99)
+        self.res6 = ResNetBlock(99,99)
+        self.attn4 =Attention(dim=99)
         self.up3 = UpsamplingBlock(128,128)
         self.res7 = ResNetBlock(128,128)
         self.attn5 = Attention(dim=128)
         self.nn6= nn.Linear(128,out_channels)
-        self.nn7 = nn.Linear(163,128)
+        self.nn7 = nn.Linear(198,128)
         self.enc = Encoder(35,35)
         self.final_conv = nn.Conv1d(out_channels, out_channels, kernel_size=1)
+        self.trans = nn.Transformer(d_model=35,nhead=5,num_encoder_layers=5,num_decoder_layers=5)
 
-    def forward(self, x,t,p):
+    def forward(self, x,t,p,cur,cur_n):
         # Downsampling
         xx = x
         x_trans,_,_=self.enc(x,p)
+        x_t=self.trans(cur_n,cur)
         d0=self.nn1(x)
         d0=torch.cat((d0,x_trans),dim=-1)
         d0=d0.unsqueeze(-1)
         d1 = self.down1(d0)
-
+        
         d1 = self.res1(d1)
         d1 = d1.unsqueeze(-1)
         d1 = self.attn1(d1)
         d1 = d1.squeeze(-1)
         d1 = d1.squeeze(-1)
         d11=d1
-        #d1=torch.cat((d1,x_trans),dim=-1)
         d1 = self.nn2(d1)
+        d1=torch.cat((d1,x_t),dim=-1)
         d1 = d1.unsqueeze(-1)
         d2 = self.down2(d1)
         d2 = self.res2(d2)
@@ -871,7 +873,7 @@ class UNetTransformer(nn.Module):
 
         ax1 = torch.cat((ax1,d22),dim=1)
         ax1 = self.mid1(ax1)
-        #ax1= torch.cat((ax1,x_trans),dim=1)
+        
         ax1=ax1.unsqueeze(-1)
 
 
@@ -885,7 +887,8 @@ class UNetTransformer(nn.Module):
         u1 = u1.squeeze(-1)
         u1 = u1.squeeze(-1)
         u1 = self.nn5(u1)
-        #u1= torch.cat((u1,x_trans),dim=-1)
+
+        u1= torch.cat((u1,x_t),dim=-1)
         u1 = u1.unsqueeze(-1)
         #print(u1.shape)
         u2 = self.up2(u1)
@@ -3530,6 +3533,7 @@ import torch.nn as nn
 import torchdiffeq  # Library for ODE solvers
 from copy import deepcopy
 import torch
+import torch_dct as dct
 #from torchtnt.utils.flops import FlopTensorDispatchMode
 #from neuralop.models import FNO
 # Define ODE function
@@ -3561,11 +3565,11 @@ class DenoiseDiffusion14_mul_vec(nn.Module):
         super().__init__()
         self.timesteps=noise_steps
         self.gaussiandiffusion = GaussianDiffusion(input_size, noise_steps, output_size)
-        self.unet = UNet(35, 35)  # Assuming 3 input and 3 output channels for RGB can changin u-net
+        self.unet = UNetTransformer(35, 35)  # Assuming 3 input and 3 output channels for RGB can changin u-net
         self.encoder=Encoder(input_size*3,35)
         self.encoder2 =Encoder(input_size,35)
         self.decoder=Decoder(35,70,5,output_size)
-        self.decoder2=Decoder(35,70,5,output_size)
+        self.decoder2=Decoder(70,35,5,output_size)
         self.flow = nn.Linear(70,64)
         self.flow2 =nn.Linear(64,35)
         self.plane1=nn.Linear(70,50)
@@ -3629,8 +3633,8 @@ class DenoiseDiffusion14_mul_vec(nn.Module):
         mean, var = self.q_xt_x0(x0, t)
         return mean + (var ** 0.5) * eps
 
-    def p_sample(self, xt,v,tim,x1,x2,t,c):
-        eps_theta,_,_,_,_= self.forward(xt,v,tim,x1,x2,t,c)
+    def p_sample(self, xt,v,x1,x2,t,c):
+        eps_theta,_,_,_,_= self.forward(xt,v,x1,x2,t,c)
         tt=torch.tensor(0).long()
         #eps_theta2 = eps_theta.repeat(1,5)
         alpha_hat = self.gaussiandiffusion.alpha_hat[tt]
@@ -3646,7 +3650,7 @@ class DenoiseDiffusion14_mul_vec(nn.Module):
         #return val*mean+(var**0.5)
         #return eps_theta
         return mean
-    def forward(self, x,v,tim,x1,x2,t,c):
+    def forward(self, x,v,x1,x2,t,c):
         time_grid = torch.linspace(0, 1, steps=10)
         y0 = v # Extend v to shape [2048, 35]
         #y0=self.dct(y0)
@@ -3661,20 +3665,12 @@ class DenoiseDiffusion14_mul_vec(nn.Module):
 
         flow_box=self.flow(flow)
         flow_box=self.flow2(flow_box)
-        flow_box=flow_box.unsqueeze(-1)
-        flow_box=flow_box.unsqueeze(-1)
-        flow_box =self.attn(flow_box)
-        flow_box=flow_box.squeeze(-1)
-        flow_box=flow_box.squeeze(-1)
+        
         #plane=torch.cat((x0,x1),dim=-1)
         plane=torch.cat((x1,x2),dim=-1)
         plane=self.plane1(plane)
         plane=self.plane2(plane)
-        plane=plane.unsqueeze(-1)
-        plane=plane.unsqueeze(-1)
-        plane = self.attn2(plane)
-        plane=plane.squeeze(-1)
-        plane=plane.squeeze(-1)
+        
         #plane=self.plane3(plane)
 
         #eps=torch.randn(2048,35)
@@ -3691,14 +3687,14 @@ class DenoiseDiffusion14_mul_vec(nn.Module):
         z,mu,logvar=self.encoder(flow_box_t,c)
         #z2=self.trans(x,c)
         t_emb = self.time_embed(t)
-        x = self.unet(z,t_emb).to(device="cpu")
+        x = self.unet(z,t_emb,flow_box).to(device="cpu")
         tt = torch.tensor(t_emb).long().to(device="cpu")
         #x2 = self.unet(z2,t_emb).to(device="cpu") 
         #tt = torch.tensor(t_emb).long().to(device="cuda")
         mean,var=self.q_xt_x0(x,tt)
         zc=torch.cat((x,z),dim=-1)
         #zc2=torch.cat((x2,z),dim=-1)
-        return self.decoder(zc,c),mean,var,vt[0,::],vt[9,::]
+        return self.decoder(zc,c),mu,logvar,vt[0,::],vt[9,::]
 class ComplexConv1d(torch.nn.Module):
     def __init__(self, *args, **kwargs):
         super().__init__()
@@ -3713,6 +3709,19 @@ class ComplexConv1d(torch.nn.Module):
         imag_out = self.real_conv(imag) + self.imag_conv(real)
 
         return torch.complex(real_out, imag_out)
+
+class SimpleRNN(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, output_size):
+        super(SimpleRNN, self).__init__()
+        self.rnn = nn.RNN(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x,condition):
+        # Initialize hidden state
+        #h0 = torch.zeros(num_layers, x.size(0), hidden_size).to(x.device)  # [num_layers, batch_size, hidden_size]
+        out, _ = self.rnn(x, condition)  # RNN forward pass
+        out = self.fc(out[:, -1, :])  # Fully connected on the last time step's output
+        return out
 class DenoiseDiffusion14_mul_vec_n_atten(nn.Module):
     def __init__(self, input_size, noise_steps,latent_size ,output_size):
         super().__init__()
@@ -3721,15 +3730,18 @@ class DenoiseDiffusion14_mul_vec_n_atten(nn.Module):
         self.unet = UNetTransformer(35, 35)  # Assuming 3 input and 3 output channels for RGB can changin u-net
         self.encoder=Encoder(input_size*3,35)
         self.encoder2 =Encoder(input_size,35)
+        self.encoder3 = Encoder(input_size,35)
         self.decoder=Decoder(35,70,5,output_size)
         self.decoder2=Decoder(35,70,5,output_size)
-        self.flow = nn.Linear(140,64)
+        self.flow = nn.Linear(105,64)
         self.flow2 =nn.Linear(64,35)
+        self.pos_net=nn.Linear(70,35)
         #self.flowgru = nn.GRU(input_size=105,hidden_size=35,num_layers=2,batch_first=False)
         self.plane1=nn.Linear(70,50)
         self.plane2=nn.Linear(50,35)
-        #self.planegru= nn.GRU(input_size=70,hidden_size=35,num_layers=2,batch_first=False)
-        #self.plane3=nn.Linear(70,35)
+        self.intgru= nn.GRU(input_size=35,hidden_size=35,num_layers=1,batch_first=True)
+        
+
         #self.gru =nn.GRU(input_size=105,hidden_size=35,num_layers=2,batch_first=True)
         self.h0 = torch.ones(2,2048, 35)
         self.func=ODEfunc(dim=35)
@@ -3741,9 +3753,11 @@ class DenoiseDiffusion14_mul_vec_n_atten(nn.Module):
         self.conv = ComplexConv1d(in_channels=1, out_channels=1, kernel_size=1)
         #self.decoder2 = Decoder(35,70,5,output_size)
         self.hidden_flow=nn.Linear(70,35)
-        self.trans =TransformerModel(in_channels=35)
+        #self.trans =nn.Transformer(d_model=35,nhead=5,num_encoder_layers=5,num_decoder_layers=5)
+        self.unet2 =UNet(35,35)
         self.time_embed = TimeEmbedding(70)
         self.integral = nn.Conv1d(in_channels=35,out_channels=35,kernel_size=1)
+        self.integral2 = nn.Conv1d(in_channels=105,out_channels=105,kernel_size=1)
         self.beta =self.gaussiandiffusion.beta
         self.mean=0
         self.logvar=0
@@ -3763,11 +3777,33 @@ class DenoiseDiffusion14_mul_vec_n_atten(nn.Module):
         idct_basis = torch.sqrt(torch.tensor(2.0 / N)) * torch.cos(math.pi / N * (k + 0.5) * n)
         idct_basis[0] /= math.sqrt(2)
         return idct_basis
-
+    
     def dct(self, x):
         # Apply DCT transformation
         return torch.matmul(x, self.dct_basis)
-
+    def positional_encoding(self,seq_len, dim, device='cpu'):
+       """
+    Generate a positional encoding matrix for a Transformer.
+    
+    Args:
+        seq_len (int): The sequence length (number of tokens).
+        dim (int): The dimension of the embedding vector.
+        device (str): The device to store the tensor ('cpu' or 'cuda').
+        
+    Returns:
+        torch.Tensor: A tensor of shape (seq_len, dim) containing the positional encodings.
+       """
+    # Create a matrix of positions (seq_len x dim)
+       positions = torch.arange(seq_len, dtype=torch.float32, device=device).unsqueeze(1)  # Shape: [seq_len, 1]
+       div_term = torch.exp(torch.arange(0, dim, 2, dtype=torch.float32, device=device) * 
+                         (-math.log(10000.0) / dim))  # Shape: [dim/2]
+    
+       # Apply sine to even indices and cosine to odd indices
+       pos_enc = torch.zeros((seq_len, dim), device=device)
+       pos_enc[:, 0::2] = torch.sin(positions * div_term)  # Even indices
+       pos_enc[:, 1::2] = torch.cos(positions * div_term)  # Odd indices
+    
+       return pos_enc
     def idct(self, x):
         # Apply IDCT transformation
         return torch.matmul(x, self.idct_basis)
@@ -3793,8 +3829,8 @@ class DenoiseDiffusion14_mul_vec_n_atten(nn.Module):
         mean, var = self.q_xt_x0(x0, t)
         return mean + (var ** 0.5) * eps
 
-    def p_sample(self, xt,v,x1,x2,t,c,cur):
-        eps_theta,_,_,_,_,_,_= self.forward(xt,v,x1,x2,t,c,cur)
+    def p_sample(self, xt,v,x1,x2,t,c,cur,vec):
+        eps_theta,_,_,_,_,_,_,_= self.forward(xt,v,x1,x2,t,c,cur,vec)
         tt=torch.tensor(0).long()
         #eps_theta2 = eps_theta.repeat(1,5)
         alpha_hat = self.gaussiandiffusion.alpha_hat[tt]
@@ -3806,27 +3842,40 @@ class DenoiseDiffusion14_mul_vec_n_atten(nn.Module):
         eps = torch.randn_like(xt)
         #return mean+(var**0.5)
         #return self.decoder(val,c)
-        #return mean + (var ** 0.5) * eps
+        return mean + (var ** 0.5) * eps
         #return val*mean+(var**0.5)
         #return eps_theta
-        return mean
-    def forward(self, x,v,x1,x2,t,c,cur):
+        #return mean
+    def forward(self, x,v,x1,x2,t,c,cur,vec):
         time_grid = torch.linspace(0, 1, steps=10)
         time_grid2 = torch.linspace(0,1,steps=2)
+        
         cur_int=cur.unsqueeze(-1)
+        
         y0 = self.integral(cur_int) # Extend v to shape [2048, 35]
         y0=y0.squeeze(-1)
-        vt=self.ode(y0,time_grid)
+        yint,h1=self.intgru(y0)
+        
+        #print(h1.shape)
+        #than this pipe line is just using ik solver that calculate the jerk and velocity!
+        vt=self.ode(yint,time_grid)
+               
         vtt=vt[9,::]-vt[0,::]
+        
         #vt=self.idct(vt)
         vt2 = self.ode(v,time_grid)
         vtx = vt2[9,::]-vt2[0,::]
-        riman=self.ode(cur,time_grid2)
+        x_i=x.unsqueeze(-1)
+        x_int=self.integral(x_i)
+        x_int=x_int.squeeze(-1)
+        #it's same work in this gru beacuse the ode learning in ik solver!
+        x_int,h_int=self.intgru(x_int)
+        riman=self.ode(x_int,time_grid2)
         riman_d=riman[1,::].mul(riman[0,::])
                  # Time grid
         flow=torch.cat((x,v),dim=-1)
         flow=torch.cat((flow,riman_d),dim=-1)
-        flow= torch.cat((flow,vtt),dim=-1)
+        #flow= torch.cat((flow,vtx),dim=-1)
         #flow_box,hidden_flow=self.flowgru(flow)
         flow_box=self.flow(flow)
         flow_box=self.flow2(flow_box)
@@ -3859,20 +3908,24 @@ class DenoiseDiffusion14_mul_vec_n_atten(nn.Module):
         flow_box_t=torch.cat((flow_op,vtx),dim=-1)
         #flow_box_t,hidden_state= self.gru(flow_box_t)
         #print(flow_box_t.shape)
-
+        # I want make noise that can be walk better~~~
 
         z,mu,logvar=self.encoder(flow_box_t,c)
+        pos_enc=self.positional_encoding(2048,70)# positional encoding that using linear equations 
+        pos_enc=self.pos_net(pos_enc)
+        z_cur,mu_cur,logvar_cur=self.encoder2(cur,vec) #embedding method in vec and cur 
+        x_noise,mu_noise,logvar_noise = self.encoder3(x,v)
         #z2=self.trans(x,c)
         t_emb = self.time_embed(t)
-    
-        x = self.unet(z,t_emb,flow_box).to(device="cpu")
+        #t_noise=self.unet2(x,t_emb)
+        #cur_pos=cur+pos_enc
+        x = self.unet(z,t_emb,flow_box,z_cur,x_noise).to(device="cpu")
         tt = torch.tensor(t_emb).long().to(device="cpu")
-        #x2 = self.unet(z2,t_emb).to(device="cpu") 
-        #tt = torch.tensor(t_emb).long().to(device="cuda")
-        mean,var=self.q_xt_x0(x,tt)
+        #z2=self.q_sample(x,tt,t_noise)
+        #x2 = self.unet(z2,t_emb,flow_box,cur).to(device="cpu") 
         zc=torch.cat((x,z),dim=-1)
         #zc2=torch.cat((x2,z),dim=-1)
-        return self.decoder(zc,c),mu,logvar,vt[0,::],vt[5,::],vt[9,::],x
+        return self.decoder(zc,c),mu,logvar,vt[0,::],vt[5,::],vt[9,::],self.decoder2(zc,x),vtt
 import torch
 import torch.nn as nn
 import math
