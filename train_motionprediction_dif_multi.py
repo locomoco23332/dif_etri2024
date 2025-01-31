@@ -16,7 +16,7 @@ import libmainlib as m
 import luamodule as lua  # see luamodule.py
 import numpy as np 
 import torch 
-from gym_mp.models2 import Encoder,Decoder,VAE, VQVAE,DenoiseDiffusion14_mul,Belfusion
+from gym_mp.models2 import Encoder,Decoder,VAE, VQVAE,DenoiseDiffusion14_mul,Belfusion,DenoiseDiffusion14_mul_vec,DenoiseDiffusion14_mul_vec_n_atten
 import torch.optim as optim
 from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler , RandomSampler
 from tensorboardX import SummaryWriter 
@@ -80,7 +80,7 @@ def Alldata_load():
 
 def main():
     
-    with open("config/dif_multi.json", "r") as file:
+    with open("config/dif_multi_n_attn.json", "r") as file:
         config = json.load(file)
     
     train = True
@@ -175,7 +175,7 @@ def main():
     ##############################
     #vqvae = VQVAE(input_size,hidden_dim, latent_size, output_size, codebook_size, latent_size, beta, False, input_frames, num_experts, True, False).to(device)
     #vqvae.set_normalization(std.to(device="cpu"),avg.to(device="cpu"))
-    vqvae = DenoiseDiffusion14_mul(input_size,timestep,latent_size,output_size).to(device)
+    vqvae = DenoiseDiffusion14_mul_vec_n_atten(input_size,timestep,latent_size,output_size).to(device)
     if load_save_model :
         print("loading model")
         vqvae = torch.load("vqvae_model_10_large_to_one.pt",map_location=device)
@@ -211,7 +211,7 @@ def main():
         encode_buffer = torch.empty(input_shape).to(device)
         
         start = time.time()
-        
+        s1=time.time()
         for ep in range(1,num_epochs+1):
             sampler = BatchSampler(SubsetRandomSampler(selectable_indices),mini_batch,drop_last=True)
             ep_recon_loss = 0
@@ -220,6 +220,11 @@ def main():
             ep_noise_loss2 =0
             ep_latent_loss =0
             ep_recon_loss2 =0
+            ep_ik_loss=0
+            ep_ik_loss2=0
+            ep_ik_loss3=0
+            ep_ground_vector_loss =0
+            ep_policy_loss=0
             num_of_minibatch = 1  
             
             for num_of_minibatch,indices in enumerate(sampler):
@@ -256,6 +261,12 @@ def main():
                     curr_pose0 = encode_buffer[:,0,:]
                     curr_pose1 = encode_buffer[:,1,:]
                     curr_pose2 = encode_buffer[:,2,:]
+                    curr_pose5 = encode_buffer[:,5,:]
+                    curr_pose9 = encode_buffer[:,9,:]
+                    curr_pose10 = encode_buffer[:,10,:]
+                    curr_vec1=curr_pose1-curr_pose0
+                    curr_vec2=curr_pose2-curr_pose0
+                    curr_vec3=curr_pose9-curr_pose
                     #future_pose = mocap_data[t_indices+10]
                     #curr_pose_vec = (mocap_data[t_indices]-mocap_data[t_indices-1])*0.01
                     #curr_pose_vec = mocap_data[t_indices+prediction_frames-1]-mocap_data[t_indices]
@@ -263,7 +274,10 @@ def main():
                     #curr_pose_vec = future_pose-curr_pose
                     #future_pose = mocap_data[(prediction_frames+t_indices)%(mocap_size)]
                     # t = torch.tensor(condition).long().to(device="cpu")
-
+                    t_check=time.time()
+                    t_check2=t_check-s1
+                    time_tensor=torch.full((2048,35),0)
+                    s1=t_check
                     noise = torch.randn_like(curr_pose_vec)
                     curr_pose_noise = vqvae.q_sample(curr_pose_vec, t, noise)
                     curr_pose_nn = vqvae.q_sample(curr_pose,t,noise)
@@ -271,14 +285,23 @@ def main():
                     #future_pose_noise = vqvae.q_sample(future_pose,t,noise)
                     # curr_pose_size= vae.sample(input_size)
                     # print(curr_pose_size.shape)
-                    condition_noise = vqvae.q_sample(condition, t)
-                    #curr_pose_n = vqvae.p_sample(curr_pose, t, condition)
+                    # noise_vec=ground_noise-curr_pose_noise......
+                    condition_noise = vqvae.q_sample(condition, t) #noise policy in this code
+                    #curr_pose_n = vqvae.p_sample(curr_pose, t, condition)# strongly comming in no policy no falliure inside this code!
                     #output, mu, logvar = vqvae(curr_pose_noise, t, condition)
+                    r=0.99
+                    r2=r*r
                     curr_flow=torch.cat((curr_pose_noise,curr_pose),dim=-1)
                     curr_flow_box=torch.cat((curr_flow,noise),dim=-1)
                     #output, mu , logvar =vqvae(curr_pose_noise,t,condition)
-                    output,mu,logvar = vqvae(curr_pose_nn,curr_pose_noise,curr_pose0,curr_pose1,curr_pose2,t,condition)
-                    curr_pose_n = vqvae.p_sample(curr_pose,curr_pose_vec,curr_pose0,curr_pose1,curr_pose2, t, condition)
+                    output,mu,logvar,ik1,ik_mid,ik2,n_oise,ik_ground_vec = vqvae(curr_pose_nn,curr_pose_noise,curr_vec1,curr_vec2,t,condition,curr_pose,curr_pose_vec)
+                    
+                    curr_pose_check=vqvae.q_sample(curr_pose,t,noise)
+
+                    curr_pose_vec_check=vqvae.q_sample(curr_pose_vec,t,n_oise)
+                    curr_pose_n = vqvae.p_sample(curr_pose_check,curr_pose_vec_check,curr_vec1,curr_vec2, t, condition,output,ik_ground_vec) # In this part we using the reinforcement learning that is environment of frame and noise.....
+                    
+
                     
                     #future_frame = vqvae.p_sample(curr_pose,t,condition)
                     #ouput2,mu2,logvar2 = vqvae(future_pose_noise,t,condition)
@@ -295,36 +318,73 @@ def main():
                     next_frame = output if use_student else ground_truth
                     #encode_buffer = encode_buffer.roll(-1, dims=1)
                     #encode_buffer[:,input_frames-1].copy_(next_frame.detach())
+                    ik_cur=curr_pose0-ik1
+                    ik_ground=curr_pose9-ik2
                     
                     history[:,0].copy_(next_frame.detach())
-                    recon_loss = (output - noise).pow(2).mean(dim=(0,-1))
+                    recon_loss = (n_oise - noise).pow(2).mean(dim=(0,-1))
                     recon_loss = recon_loss.sum()
                     #recon_loss2 = (ground_truth-Pose).pow(2).mean(dim=(0,-1))
                     #recon_loss2 =(future_frame-ground_truth).pow(2).mean(dim=(0,-1))
                     #recon_loss2 = recon_loss2.sum()
-                    recon_loss2 = (curr_pose_n-ground_truth).pow(2).mean(dim=(0,-1))
-                    recon_loss2 = recon_loss2.sum()        
+                    #good of policy network
+                    recon_loss2 = (curr_pose_n-curr_pose10).pow(2).mean(dim=(0,-1))
+                    recon_loss2 = recon_loss2.sum()
+                    
+                    recon_loss3_1 = (curr_pose0-ik1).pow(2).mean(dim=(0,-1))
+                    recon_loss3_2 =(curr_pose9-ik2).pow(2).mean(dim=(0,-1))
+                    recon_loss3_3 =(curr_pose5-ik_mid).pow(2).mean(dim=(0,-1))
+                    #over 3 is ik loss in this code
+                    recon_loss3_1 = recon_loss3_1.sum()
+                    recon_loss3_2 = recon_loss3_2.sum()
+                    recon_loss3_3 = recon_loss3_3.sum()
                     loss = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).sum().clamp(max=0)
                     loss /= logvar.numel()
                     vqvae_optimizer.zero_grad()
+                    recon_loss4 = (ground_truth-output).pow(2).mean(dim=(0,-1))
+                    recon_loss4 = recon_loss4.sum() 
+  
+                    recon_loss5 = (ik_ground_vec-curr_pose_vec).pow(2).mean(dim=(0,-1))
+                    recon_loss5 = recon_loss5.sum()
+                    
+                    
                     #(recon_loss+loss).backward()
-                    (recon_loss+loss+recon_loss2).backward()
+                    (loss+recon_loss+recon_loss2+r2*recon_loss3_1+r*recon_loss3_2+recon_loss3_3+recon_loss4+recon_loss5).backward()
+                    #(recon_loss2).backward()
+
                     vqvae_optimizer.step()
                     
                     ep_q_loss += float(loss)/prediction_frames
-                    ep_recon_loss += float(recon_loss) / prediction_frames
+                    ep_recon_loss += float(recon_loss4) / prediction_frames
                     ep_recon_loss2 += float(recon_loss2) / prediction_frames
+                    ep_ik_loss += float(recon_loss3_1)/prediction_frames
+                    ep_ik_loss2 += float(recon_loss3_2)/prediction_frames
+                    ep_ik_loss3 += float(recon_loss3_3)/prediction_frames
+                    ep_latent_loss+= float(recon_loss)/prediction_frames
+                    ep_ground_vector_loss += float(recon_loss5)/prediction_frames
                     
+                   
                   
             avg_recon_loss = ep_recon_loss / mini_batch
             avg_kl_loss = ep_q_loss / mini_batch
             avg_recon_loss2 = ep_recon_loss2/mini_batch
+            avg_ik_recon = ep_ik_loss/mini_batch
+            avg_ik_recon2 = ep_ik_loss2/mini_batch
+            avg_ik_recon3 = ep_ik_loss3/mini_batch
+            avg_latent_loss =ep_latent_loss/mini_batch
+            avg_ground_vec_loss =ep_ground_vector_loss/mini_batch
             scheduler_lr.step()
             end = time.time()
-            print("epoch : {ep}, ep_noise_loss : {ep_recon_loss:0.08f},kl_loss : {q:0.08f}, ep_recon2_loss:{r2:0.08f}, learning_rate : {lr:0.07f} , FPS : {FPS}".format(ep=ep,ep_recon_loss=avg_recon_loss,q=ep_q_loss,r2=avg_recon_loss2,lr=vqvae_optimizer.param_groups[0]['lr'],FPS=int((ep/(end-start))*100)))
+            print("epoch : {ep}, ep_noise_loss : {ep_recon_loss:0.08f},q:{q:0.08f} p:{p:0.08f} ik_loss:{ik:0.08f},ik_loss2:{ik2:0.08f},ik_loss3:{ik3:0.08f},latent:{lat:0.08f} vec:{vec:0.08f}   learning_rate : {lr:0.07f} , FPS : {FPS}".format(ep=ep,ep_recon_loss=avg_recon_loss,q=avg_kl_loss,p=avg_recon_loss2,ik=avg_ik_recon,ik2=avg_ik_recon2,ik3=avg_ik_recon3,lat=avg_latent_loss,vec=avg_ground_vec_loss,lr=vqvae_optimizer.param_groups[0]['lr'],FPS=int((ep/(end-start))*100)))
             writer.add_scalar('ep_noise_loss',avg_recon_loss,ep)
             writer.add_scalar('ep_kl_loss',avg_kl_loss,ep)
             writer.add_scalar('ep_recon2_loss',avg_recon_loss,ep)
+            writer.add_scalar('ep_policy_loss',avg_recon_loss2,ep)
+            writer.add_scalar('ep_ik_lsoss',avg_ik_recon,ep)
+            writer.add_scalar('ep_ik_loss2',avg_ik_recon2,ep)
+            writer.add_scalar('ep_ik_loss3',avg_ik_recon3,ep)
+            writer.add_scalar('ep_latetn_loss',avg_latent_loss,ep)
+            writer.add_scalar('ep_ground_vec_loss',avg_ground_vec_loss,ep)
             writer.add_scalar('learning_rate',vqvae_optimizer.param_groups[0]['lr'],ep)
     
            
@@ -401,12 +461,14 @@ def test_dif316(latent,latent2,latent3,latent4,latent5,latent6,latent7,latent8,l
        
         condition=condition.view(1,-1)
         curr_vec=latent_vector9-latent_vector8
+        curr_vec1=latent_vector8-latent_vector7
+        curr_vec2=latent_vector9-latent_vector7
         #print(condition.shape)
         #output=settings.DIF1016.q_sample(condition,1)
         #output = settings.DIF1010cur.p_sample(condition,latent_vector)
         #output=settings.DIF1015ori.p_sample(output,latent_vector2,condition)
         #output= settings.DIF1016.p_sample(condition_vec,latent_vector0,latent_vector)
-        output = settings.DIF1016.p_sample(latent_vector,curr_vec, latent_vector2,latent_vector5,latent_vector8,latent_vector0, latent_vector9)     
+        output = settings.DIF1016.p_sample(latent_vector,curr_vec,condition,curr_vec1,curr_vec2,latent_vector0, latent_vector9)     
         #output = settings.DIF1016.p_sample(output, latent_vector0, latent_vector5)
         #output = settings.DIF1016.p_sample(output,latent_vector0,condition)
         #output =settings.DIF1016.generate(output,condition)
