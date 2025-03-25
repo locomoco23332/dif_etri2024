@@ -3299,7 +3299,11 @@ class DenoiseDiffusion14(nn.Module):
         self.unet = UNet(35, 35)  # Assuming 3 input and 3 output channels for RGB can changin u-net
         self.encoder=Encoder(input_size,35)
         self.decoder=Decoder(35,70,5,output_size)
+        self.decoder2=Decoder(35,35,5,output_size)
+        self.ode = NeuralODE(dim=35)
         #self.decoder2 = Decoder(35,70,5,output_size)
+        self.integral = nn.Conv1d(in_channels=35,out_channels=35,kernel_size=1)
+        self.intgru= nn.GRU(input_size=35,hidden_size=35,num_layers=1,batch_first=True)
         self.trans =TransformerModel(in_channels=35)
         self.time_embed = TimeEmbedding(70)
         self.beta =self.gaussiandiffusion.beta
@@ -3339,10 +3343,31 @@ class DenoiseDiffusion14(nn.Module):
         #return eps_theta
         return mean
     def forward(self, x,t,c):
+        time_grid = torch.linspace(0, 1, steps=10)
+        time_grid2 = torch.linspace(0,1,steps=2)
+        x_n=x
+        z_n,mu_n,logvar_n=self.encoder(x_n,c)
+    
+        #c is anchor
+        cur_int,mu_x,logvar_x=self.encoder(x,c)
+        cur_int=cur_int.unsqueeze(-1)
+        y0 = self.integral(cur_int) # Extend v to shape [2048, 35]
+        y0=y0.squeeze(-1)
+        yint,h1=self.intgru(y0)
+        yint=self.decoder2(yint,c)
+        #full box of neural ik in this space !
+        #print(h1.shape)
+        #than this pipe line is just using ik solver that calculate the jerk and velocity!
+        #Hmm what happen to you ?
+        #OK than we can thinking about the minimum about this problem maybe its just a problem that happen in this file 
+        #then we can make depender in this system!
+        #print(yint)
+        vt=self.ode(yint,time_grid)
+               
         z,mu,logvar=self.encoder(x,c)
         t_emb = self.time_embed(t)
-        x = self.unet(z,t_emb).to(device="cpu")
-        tt = torch.tensor(t_emb).long().to(device="cpu")
+        x = self.unet(z,t_emb).to(device="cuda")
+        tt = torch.tensor(t_emb).long().to(device="cuda")
         #tt = torch.tensor(t_emb).long().to(device="cuda")
         mean,var=self.q_xt_x0(x,tt)
         zc=torch.cat((x,z),dim=-1)
@@ -3722,7 +3747,7 @@ class SimpleRNN(nn.Module):
         out, _ = self.rnn(x, condition)  # RNN forward pass
         out = self.fc(out[:, -1, :])  # Fully connected on the last time step's output
         return out
-
+#general method in world and weak solution in probability!
 class DenoiseDiffusion14_mul_vec_n_atten(nn.Module):
     def __init__(self, input_size, noise_steps,latent_size ,output_size):
         super().__init__()
@@ -3732,17 +3757,19 @@ class DenoiseDiffusion14_mul_vec_n_atten(nn.Module):
         self.encoder=Encoder(input_size*3,35)
         self.encoder2 =Encoder(input_size,35)
         self.encoder3 = Encoder(input_size,35)
-        self.encoder4 = Encoder(input_size,35)
-        self.encoder5 = Encoder(input_size,35)
+        self.encoder4 = Encoder2(input_size,35)
+        self.encoder5 = Encoder2(input_size,35)
         self.encoder6 = Encoder(input_size,35)
-        self.world_enc = Encoder(input_size,35)
-        self.world_dec = Decoder(35,70,5,output_size)
+        self.world_enc = Encoder2(input_size,35)
+        self.world_dec = Decoder2(35,35,5,output_size)
         self.decoder=Decoder(35,70,5,output_size)
         self.decoder2=Decoder(35,70,5,output_size)
         self.decoder3 = Decoder(35,70,5,output_size)
         self.decoder4 = Decoder(35,35,5,output_size)
         self.decoder5 = Decoder(35,70,5,output_size)
-    
+        #self.world_gru = nn.GRU(input_size=35,hidden_size=35,num_layers=1,batch_first=True)
+        #if so delicated than function overfitting! 
+        #in this sense we can thinking about light version about model!
         self.flow = nn.Linear(105,64)
         self.flow2 =nn.Linear(64,35)
         self.pos_net=nn.Linear(70,35)
@@ -3766,6 +3793,7 @@ class DenoiseDiffusion14_mul_vec_n_atten(nn.Module):
         #self.trans =nn.Transformer(d_model=35,nhead=5,num_encoder_layers=5,num_decoder_layers=5)
         self.unet2 =UNet0(35,35)
         self.unet3 = UNet0(35,35)
+        #World VAE model in this sense!
        # self.unet4 = UNet0(35,35)
         self.time_embed = TimeEmbedding(70)
         self.integral = nn.Conv1d(in_channels=35,out_channels=35,kernel_size=1)
@@ -3778,10 +3806,14 @@ class DenoiseDiffusion14_mul_vec_n_atten(nn.Module):
         self.idct_basis = self.create_idct_basis(35)
         self.world1 = nn.Linear(35,70)
         self.world2 = nn.Linear(105,35)
-        self.world3 = nn.Linear(35,35)
-        self.world4 = nn.Linear(35,35)
-        self.world5 = nn.Linear(35,35)
-        self.world6 = nn.Linear(140,35)
+        #self.world3 = nn.Linear(35,35)
+        #self.world4 = nn.Linear(35,35)
+        #self.world5 = nn.Linear(35,35)
+        self.world3 = nn.Linear(105,105)       
+        self.world6 = nn.Linear(105,35)
+        
+        
+        self.normal_sampls =nn.Linear(35,35)
     
 
     def create_dct_basis(self, N):
@@ -3848,24 +3880,35 @@ class DenoiseDiffusion14_mul_vec_n_atten(nn.Module):
             eps = torch.randn_like(x0)
         mean, var = self.q_xt_x0(x0, t)
         return mean + (var ** 0.5) * eps
-    def world(self,curr,cur1,cur2,cur3,condition,t,noise):
+    # real manifold vs data manifold
+    def world(self,curr,cur1,cur2,cur3,condition,w,t,noise):
         world_cur=self.q_sample(curr,t,noise)
         world = self.world1(world_cur)
-        sub_world=self.world3(cur1)
-        sub_world2=self.world4(cur2)
-        sub_world3=self.world5(cur3)
-        sub_world_t=torch.cat((sub_world,sub_world2),dim=-1)
-        sub_world_t=torch.cat((sub_world_t,sub_world3),dim=-1)
+        cur=torch.cat((cur1,cur2),dim=-1)
+        cur=torch.cat((cur,cur3),dim=-1)
+        sub_world_t=self.world3(cur)
+        #sub_world=self.world3(cur1)
+        #sub_world2=self.world4(cur2)
+        #sub_world3=self.world5(cur3)
+        #sub_world_t=torch.cat((sub_world,sub_world2),dim=-1)
+        #sub_world_t=torch.cat((sub_world_t,sub_world3),dim=-1)
         #Model->Vison->Memory->ODE-> World position!
         #World Embedding and making encoder and decoder and taking the ode!
         #Using Anchor Condition!  
         #sub_world_t,world_mu,world_logvar=self.encoder(sub_world_t,condition)
+        
         world_E,w_m,w_l=self.world_enc(world_cur,condition)
-        world_x=self.unet2(world_E,t)
-        world_E=torch.cat((world_E,world_x),dim=-1)
+        #V model and M model and C model is clear!
+        #world_x=self.unet2(world_E,t)
+        #world_E=torch.cat((world_E,),dim=-1)
         world_E=self.world_dec(world_E,condition)
-        sub_world_t=torch.cat((sub_world_t,world_E),dim=-1)
+        #sub_world_t=torch.cat((sub_world_t,world_E),dim=-1)
+       # than what happen in this field when using vae ....... 
+       # some over fitting is here!
         sub_world_t=self.world6(sub_world_t)
+        #sub_world_t,s_h = self.world_gru(sub_world_t)
+        #No reason using more gru ok stop in this time!
+    
         #sub_world_t=self.decoder(sub_world_t,condition)
         time_grid = torch.linspace(0, 1, steps=10)
         #sub_world_t=self.dct(sub_world_t)
@@ -3877,7 +3920,7 @@ class DenoiseDiffusion14_mul_vec_n_atten(nn.Module):
         world_flow=sw[9,::]-sw[0,::]
         #world_flow=self.idct(world_flow)
         world=torch.cat((world_flow,world),dim=-1)
-        return  self.world2(world)
+        return  self.world2(world),w_m,w_l
 
     def p_sample(self, xt,v,x1,x2,t,c,cur,vec):
         eps_theta,_,_,_,_,_,_,_= self.forward(xt,v,x1,x2,t,c,cur,vec)
@@ -3897,6 +3940,34 @@ class DenoiseDiffusion14_mul_vec_n_atten(nn.Module):
         #return val*mean+(var**0.5)
         #return eps_theta
         #return mean
+    def pd_sample(self, xt,v,x1,x2,t,c,cur,vec):
+        eps_theta,_,_,_,_,_,_,_= self.forward(xt,v,x1,x2,t,c,cur,vec)
+        tt=torch.tensor(0).long()
+        #eps_theta2 = eps_theta.repeat(1,5)
+        #dual sampling in this space!
+        alpha_hat = self.gaussiandiffusion.alpha_hat[tt]
+        alpha = self.gaussiandiffusion.alpha[tt]
+        eps_coef = (1 - alpha) / (1 - alpha_hat) ** 0.5
+        #eps_coef2 = eps_coef.repeat(1,5)
+        mean = 1 / (alpha ** 0.5) * (xt - eps_coef * eps_theta)
+        var = self.gaussiandiffusion.beta[tt]
+        eps = torch.randn_like(xt)
+        #return mean+(var**0.5)
+        #return self.decoder(val,c)
+        return mean-(var**0.5)*eps
+        #dual sense in this sampling!
+        #return mean
+        #return val*mean+(var**0.5)
+        #return eps_theta
+        #return mean
+    def normal_sample(self,x1,x2):
+        normal=x1+x2
+        #normal=torch.cat((normal,x1),dim=-1)
+        
+        #normal=torch.cat((normal,x2),dim=-1)
+        #normal=self.normal_sample1(normal)
+        #normal=self.normal_sample2(normal)
+        return self.normal_sampls(normal)
     def forward(self, x,v,x1,x2,t,c,cur,vec):
         time_grid = torch.linspace(0, 1, steps=10)
         time_grid2 = torch.linspace(0,1,steps=2)
@@ -3915,6 +3986,9 @@ class DenoiseDiffusion14_mul_vec_n_atten(nn.Module):
         #print(h1.shape)
         #than this pipe line is just using ik solver that calculate the jerk and velocity!
         #Hmm what happen to you ?
+        #OK than we can thinking about the minimum about this problem maybe its just a problem that happen in this file 
+        #then we can make depender in this system!
+        #print(yint)
         vt=self.ode(yint,time_grid)
                
         vtt=vt[9,::]-vt[0,::]
@@ -3981,7 +4055,7 @@ class DenoiseDiffusion14_mul_vec_n_atten(nn.Module):
         pos_enc=self.pos_net(pos_enc)
         z_cur,mu_cur,logvar_cur=self.encoder2(cur,vec) #embedding method in vec and cur 
         x_noise,mu_noise,logvar_noise = self.encoder3(x,v)
-        cur_z,cur_mu,cur_logvar=self.encoder4(x,cur)
+        #cur_z,cur_mu,cur_logvar=self.encoder4(x,cur)
         #z2=self.trans(x,c)
         t_emb = self.time_embed(t)
         #t_noise=self.unet2(x,t_emb)
@@ -4009,6 +4083,7 @@ class DenoiseDiffusion14_mul_vec_n_atten(nn.Module):
         #latent space of decoder space !
         return self.decoder(zc,c),mu,logvar,self.idct(vt[0,::]),self.idct(vt[5,::]),self.idct(vt[9,::]),self.decoder5(n_oise,c),vtt
 import torch
+
 import torch.nn as nn
 import math
 
