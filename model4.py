@@ -3757,9 +3757,9 @@ class DenoiseDiffusion14_mul_vec_n_atten(nn.Module):
         self.encoder=Encoder(input_size*3,35)
         self.encoder2 =Encoder(input_size,35)
         self.encoder3 = Encoder(input_size,35)
-        self.encoder4 = Encoder2(input_size,35)
-        self.encoder5 = Encoder2(input_size,35)
-        self.encoder6 = Encoder(input_size,35)
+        self.encoder4 = Encoder(input_size,35)
+        self.encoder5 = Encoder(input_size,35)
+        self.encoder6 = Encoder2(input_size,35)
         self.world_enc = Encoder2(input_size,35)
         self.world_dec = Decoder2(35,35,5,output_size)
         self.decoder=Decoder(35,70,5,output_size)
@@ -3798,6 +3798,7 @@ class DenoiseDiffusion14_mul_vec_n_atten(nn.Module):
         self.time_embed = TimeEmbedding(70)
         self.integral = nn.Conv1d(in_channels=35,out_channels=35,kernel_size=1)
         self.integral2 = nn.Conv1d(in_channels=105,out_channels=105,kernel_size=1)
+        self.su_int = nn.Linear(35,35)
         self.beta =self.gaussiandiffusion.beta
         self.final_layer=nn.Linear(35,35)
         self.mean=0
@@ -3940,34 +3941,34 @@ class DenoiseDiffusion14_mul_vec_n_atten(nn.Module):
         #return val*mean+(var**0.5)
         #return eps_theta
         #return mean
-    def pd_sample(self, xt,v,x1,x2,t,c,cur,vec):
-        eps_theta,_,_,_,_,_,_,_= self.forward(xt,v,x1,x2,t,c,cur,vec)
-        tt=torch.tensor(0).long()
-        #eps_theta2 = eps_theta.repeat(1,5)
-        #dual sampling in this space!
-        alpha_hat = self.gaussiandiffusion.alpha_hat[tt]
-        alpha = self.gaussiandiffusion.alpha[tt]
-        eps_coef = (1 - alpha) / (1 - alpha_hat) ** 0.5
-        #eps_coef2 = eps_coef.repeat(1,5)
-        mean = 1 / (alpha ** 0.5) * (xt - eps_coef * eps_theta)
-        var = self.gaussiandiffusion.beta[tt]
-        eps = torch.randn_like(xt)
+    #def pd_sample(self, xt,v,x1,x2,t,c,cur,vec):
+    #    eps_theta,_,_,_,_,_,_,_= self.forward(xt,v,x1,x2,t,c,cur,vec)
+    #    tt=torch.tensor(0).long()
+    #    #eps_theta2 = eps_theta.repeat(1,5)
+    #    #dual sampling in this space!
+    #    alpha_hat = self.gaussiandiffusion.alpha_hat[tt]
+    #    alpha = self.gaussiandiffusion.alpha[tt]
+    #    eps_coef = (1 - alpha) / (1 - alpha_hat) ** 0.5
+    #    #eps_coef2 = eps_coef.repeat(1,5)
+    #    mean = 1 / (alpha ** 0.5) * (xt - eps_coef * eps_theta)
+    #    var = self.gaussiandiffusion.beta[tt]
+    #    eps = torch.randn_like(xt)
         #return mean+(var**0.5)
         #return self.decoder(val,c)
-        return mean-(var**0.5)*eps
+    #    return mean-(var**0.5)*eps
         #dual sense in this sampling!
         #return mean
         #return val*mean+(var**0.5)
         #return eps_theta
         #return mean
-    def normal_sample(self,x1,x2):
-        normal=x1+x2
+    #def normal_sample(self,x1,x2):
+    #    normal=x1+x2
         #normal=torch.cat((normal,x1),dim=-1)
         
         #normal=torch.cat((normal,x2),dim=-1)
         #normal=self.normal_sample1(normal)
         #normal=self.normal_sample2(normal)
-        return self.normal_sampls(normal)
+    #    return self.normal_sampls(normal)
     def forward(self, x,v,x1,x2,t,c,cur,vec):
         time_grid = torch.linspace(0, 1, steps=10)
         time_grid2 = torch.linspace(0,1,steps=2)
@@ -4080,8 +4081,9 @@ class DenoiseDiffusion14_mul_vec_n_atten(nn.Module):
         #when my first try is to check the layer 2->1 ...
         #Moe=torch.cat((e1,e2),dim=-1)
         #return self.final_layer(self.decoder(zc,c)+self.decoder3(zc_cur,cur)),mu,logvar,self.idct(vt[0,::]),self.idct(vt[5,::]),self.idct(vt[9,::]),self.decoder2(zc,x),vtt
-        #latent space of decoder space !
-        return self.decoder(zc,c),mu,logvar,self.idct(vt[0,::]),self.idct(vt[5,::]),self.idct(vt[9,::]),self.decoder5(n_oise,c),vtt
+        #latent space of decoder space !\
+        output=self.decoder(zc,c)+cur
+        return self.su_int(output),mu,logvar,self.idct(vt[0,::]),self.idct(vt[5,::]),self.idct(vt[9,::]),self.decoder5(n_oise,c),vtt
 import torch
 
 import torch.nn as nn
